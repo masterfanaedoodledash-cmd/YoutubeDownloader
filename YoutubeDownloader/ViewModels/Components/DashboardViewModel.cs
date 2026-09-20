@@ -17,6 +17,7 @@ using YoutubeDownloader.Framework;
 using YoutubeDownloader.Localization;
 using YoutubeDownloader.Services;
 using YoutubeExplode.Exceptions;
+using YoutubeExplode.Videos;
 
 namespace YoutubeDownloader.ViewModels.Components;
 
@@ -83,15 +84,12 @@ public partial class DashboardViewModel : ViewModelBase
 
     private async Task EnsureFFmpegAsync()
     {
-        // If a custom path is set, trust that the user knows what they're doing
         if (_settingsService.FFmpegFilePath is not null)
             return;
 
-        // If FFmpeg can be auto-detected, all good
         if (FFmpeg.TryGetCliFilePath() is not null)
             return;
 
-        // Otherwise, prompt the user to download FFmpeg
         var dialog = _viewModelManager.GetMessageBoxViewModel(
             _localizationManager.FFmpegMissingTitle,
             string.Format(_localizationManager.FFmpegMissingMessage, Program.Name),
@@ -99,7 +97,6 @@ public partial class DashboardViewModel : ViewModelBase
             _localizationManager.CloseButton
         );
 
-        // If the user declined, open settings to nudge them to set a custom FFmpeg path
         if (await _dialogManager.ShowDialogAsync(dialog) != true)
         {
             await _dialogManager.ShowDialogAsync(_viewModelManager.GetSettingsViewModel());
@@ -122,10 +119,7 @@ public partial class DashboardViewModel : ViewModelBase
         catch (Exception ex)
         {
             await _dialogManager.ShowDialogAsync(
-                _viewModelManager.GetMessageBoxViewModel(
-                    _localizationManager.ErrorTitle,
-                    ex.Message
-                )
+                _viewModelManager.GetMessageBoxViewModel(_localizationManager.ErrorTitle, ex.Message)
             );
 
             App.Shutdown(3);
@@ -206,7 +200,6 @@ public partial class DashboardViewModel : ViewModelBase
         {
             try
             {
-                // Delete the incompletely downloaded file
                 if (!string.IsNullOrWhiteSpace(download.FilePath))
                     File.Delete(download.FilePath);
             }
@@ -217,8 +210,6 @@ public partial class DashboardViewModel : ViewModelBase
 
             download.Status =
                 ex is OperationCanceledException ? DownloadStatus.Canceled : DownloadStatus.Failed;
-
-            // Short error message for YouTube-related errors, full for others
             download.ErrorMessage = ex is YoutubeExplodeException ? ex.Message : ex.ToString();
         }
         finally
@@ -237,31 +228,49 @@ public partial class DashboardViewModel : ViewModelBase
             return;
 
         IsBusy = true;
-
-        // Small weight so as to not offset any existing download operations
         var progress = _progressMuxer.CreateInput(0.01);
 
         try
         {
             using var resolver = new QueryResolver(_settingsService.LastAuthCookies);
-
-            // Split queries by newlines
             var queries = Query.Split(
                 '\n',
                 StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries
             );
-
-            // Process individual queries
             var queryResults = new List<QueryResult>();
+
             foreach (var (i, query) in queries.Index())
             {
                 try
                 {
                     queryResults.Add(await resolver.ResolveAsync(query));
                 }
-                // If it's not the only query in the list, don't interrupt the process
-                // and report the error via an async notification instead of a sync dialog.
-                // https://github.com/Tyrrrz/YoutubeDownloader/issues/563
+                catch (VideoUnavailableException) when (queries.Length == 1)
+                {
+                    var videoId = VideoId.TryParse(query);
+                    if (videoId is null)
+                        throw;
+
+                    var filePath = Path.Combine(
+                        Environment.CurrentDirectory,
+                        $"{videoId.Value}.mp4"
+                    );
+
+                    if (
+                        await ArchiveRecovery.TryDownloadAsync(
+                            videoId.Value,
+                            filePath
+                        )
+                    )
+                    {
+                        Query = "";
+                        return;
+                    }
+
+                    throw new InvalidOperationException(
+                        $"No archive or mirror found for video {videoId.Value}."
+                    );
+                }
                 catch (YoutubeExplodeException ex)
                     when (ex is VideoUnavailableException or PlaylistUnavailableException
                         && queries.Length > 1
@@ -273,21 +282,16 @@ public partial class DashboardViewModel : ViewModelBase
                 progress.Report(Percentage.FromFraction((i + 1.0) / queries.Length));
             }
 
-            // Aggregate results
             var queryResult = QueryResult.Aggregate(queryResults);
 
-            // Single video result
             if (queryResult.Videos.Count == 1)
             {
                 var video = queryResult.Videos.Single();
-
                 using var downloader = new VideoDownloader(_settingsService.LastAuthCookies);
-
                 var downloadOptions = await downloader.GetDownloadOptionsAsync(
                     video.Id,
                     _settingsService.ShouldInjectLanguageSpecificAudioStreams
                 );
-
                 var download = await _dialogManager.ShowDialogAsync(
                     _viewModelManager.GetDownloadSingleSetupViewModel(video, downloadOptions)
                 );
@@ -296,20 +300,16 @@ public partial class DashboardViewModel : ViewModelBase
                     return;
 
                 EnqueueDownload(download);
-
                 Query = "";
             }
-            // Multiple videos
             else if (queryResult.Videos.Count > 1)
             {
                 var downloads = await _dialogManager.ShowDialogAsync(
                     _viewModelManager.GetDownloadMultipleSetupViewModel(
                         queryResult.Title,
                         queryResult.Videos,
-                        // Pre-select videos if they come from a single query and not from search
-                        queryResult.Kind
-                            is not QueryResultKind.Search
-                                and not QueryResultKind.Aggregate
+                        queryResult.Kind is not QueryResultKind.Search
+                            and not QueryResultKind.Aggregate
                     )
                 );
 
@@ -321,7 +321,6 @@ public partial class DashboardViewModel : ViewModelBase
 
                 Query = "";
             }
-            // No videos found
             else
             {
                 await _dialogManager.ShowDialogAsync(
@@ -337,10 +336,7 @@ public partial class DashboardViewModel : ViewModelBase
             await _dialogManager.ShowDialogAsync(
                 _viewModelManager.GetMessageBoxViewModel(
                     LocalizationManager.ErrorTitle,
-                    // Short error message for YouTube-related errors, full for others
-                    ex is YoutubeExplodeException
-                        ? ex.Message
-                        : ex.ToString()
+                    ex is YoutubeExplodeException ? ex.Message : ex.Message
                 )
             );
         }
@@ -426,7 +422,6 @@ public partial class DashboardViewModel : ViewModelBase
         if (disposing)
         {
             CancelAllDownloads();
-
             _eventSubscription.Dispose();
             _downloadSemaphore.Dispose();
         }
