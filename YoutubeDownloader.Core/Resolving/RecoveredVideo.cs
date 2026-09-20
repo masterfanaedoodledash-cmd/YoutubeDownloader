@@ -1,14 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.Net;
-using YoutubeDownloader.Core.Utils;
 using YoutubeExplode.Common;
 using YoutubeExplode.Videos;
 
 namespace YoutubeDownloader.Core.Resolving;
 
 /// <summary>
-/// Video metadata recovered from an archived YouTube watch page.
+/// Video metadata recovered from an external archive.
 /// </summary>
 internal sealed class RecoveredVideo : IVideo
 {
@@ -22,12 +20,10 @@ internal sealed class RecoveredVideo : IVideo
     {
         Id = id;
         Title = string.IsNullOrWhiteSpace(title) ? $"Recovered video ({id})" : title;
-
-        var channelId = YoutubeDownloader.Core.Resolving.RecoveryResolver.GetFallbackChannelId(
-            authorChannelId
+        Author = new Author(
+            new Channels.ChannelId(authorChannelId ?? ""),
+            string.IsNullOrWhiteSpace(authorName) ? "Unknown channel" : authorName
         );
-        Author = new Author(channelId, string.IsNullOrWhiteSpace(authorName) ? "Unknown channel" : authorName);
-
         Thumbnails =
         [
             new Thumbnail(
